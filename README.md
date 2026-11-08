@@ -106,7 +106,7 @@ In parallel mode inside a git repo, each agent gets its own worktree and branch,
   calc.py | 2 +-
 ```
 
-`/keep` merges the version you pick into your branch and removes the other one. Cancelling a run removes both.
+`/diff` shows each agent's changes as a colored diff. `/keep` lists what each one changed, can show the diffs first, then merges the version you pick into your branch and removes the other one. Cancelling a run removes both.
 
 ## Commands
 
@@ -118,6 +118,7 @@ In parallel mode inside a git repo, each agent gets its own worktree and branch,
 | `/effort` | reasoning effort per agent |
 | `/agents` | turn an agent on or off |
 | `/write` | toggle read-only and write |
+| `/diff` | show what each agent changed after a write run |
 | `/keep` | merge one agent's branch after a write run |
 | `/new` | forget the conversation |
 | `/cwd` | change the working folder |
