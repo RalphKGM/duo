@@ -13,7 +13,7 @@ import {
   CLAUDE_MODELS, codexModels, EFFORTS, DUO_DIR, DEFAULTS,
 } from '../lib/config.js';
 import { runPrompt } from '../lib/engine.js';
-import { mergeWorktree, removeWorktrees } from '../lib/git.js';
+import { mergeWorktree, removeWorktrees, diffWorktree } from '../lib/git.js';
 import { startApprovalServer, describeAction } from '../lib/approval.js';
 
 const MODES = {
@@ -30,6 +30,7 @@ const COMMANDS = [
   { name: '/agents', description: 'turn agents on or off' },
   { name: '/settings', description: 'every setting in one place' },
   { name: '/write', description: 'toggle between read-only research and editing files' },
+  { name: '/diff', description: 'after a write run: show what each agent changed' },
   { name: '/keep', description: 'after a write run: merge one agent\'s changes, discard the rest' },
   { name: '/new', description: 'start a fresh conversation (agents forget context)' },
   { name: '/cwd', description: 'change the folder the agents work in' },
@@ -129,6 +130,20 @@ function Item({ item, width }) {
       return html`<${Box} paddingLeft=${2} marginBottom=${1} width=${width}><${Text} color=${T.warn}>⚠ ${item.text}</${Text}></${Box}>`;
     case 'error':
       return html`<${Box} paddingLeft=${2} marginBottom=${1} width=${width}><${Text} color=${T.err}>✗ ${item.text}</${Text}></${Box}>`;
+    case 'diff': {
+      const lines = item.patch.split('\n');
+      const max = 300;
+      const shown = lines.slice(0, max);
+      const color = (l) => (l.startsWith('+++') || l.startsWith('---') ? undefined : l.startsWith('+') ? T.ok : l.startsWith('-') ? T.err : l.startsWith('@@') ? T.codex : l.startsWith('diff ') ? T.accent : T.dim);
+      return html`
+        <${Box} flexDirection="column" marginBottom=${1}>
+          <${Text}><${Text} color=${agentColor(item.agent)} bold>● ${AGENTS[item.agent].name}'s changes</${Text}><${Text} color=${T.dim}>  ${item.branch}</${Text}></${Text}>
+          <${Box} paddingLeft=${2} flexDirection="column" width=${width}>
+            ${item.patch ? shown.map((l, i) => html`<${Text} key=${i} color=${color(l)} bold=${l.startsWith('diff ')} wrap="truncate-end">${l || ' '}</${Text}>`) : html`<${Text} color=${T.dim}>No changes.</${Text}>`}
+            ${lines.length > max ? html`<${Text} color=${T.warn}>… ${lines.length - max} more lines. Full diff: git diff ${item.base.slice(0, 8)} ${item.branch}</${Text}>` : null}
+          </${Box}>
+        </${Box}>`;
+    }
     case 'help':
       return html`
         <${Box} flexDirection="column" marginBottom=${1} paddingLeft=${2}>
@@ -222,11 +237,11 @@ function PromptInput({ active, onSubmit, onExit, onClear, history, width, config
       if (key.upArrow || key.downArrow) {
         if (sugg.length) return setSel((s) => (s + (key.upArrow ? -1 : 1) + sugg.length) % sugg.length);
         if (!history.length) return;
-        let i = hIdx;
-        if (i === -1) draft.current = ed.value;
-        i = key.upArrow ? Math.min(history.length - 1, i + 1) : i - 1;
+        if (key.downArrow && hIdx === -1) return;
+        if (hIdx === -1) draft.current = ed.value;
+        const i = key.upArrow ? Math.min(history.length - 1, hIdx + 1) : Math.max(-1, hIdx - 1);
         setHIdx(i);
-        return ed.set(i === -1 ? draft.current : history[history.length - 1 - i]);
+        return ed.set(i === -1 ? draft.current : history[history.length - 1 - i] ?? '');
       }
       if (ed.handle(input, key)) {
         setSel(0);
@@ -576,14 +591,42 @@ export function App({ initialPrompt, initialCwd }) {
       case '/new':
         sessions.current = {};
         return info('Fresh start — the agents won’t remember earlier prompts.');
+      case '/diff': {
+        const t = lastTrees.current;
+        if (!t) return info('No changes to show — /diff works after a parallel run in write mode.');
+        const want = t.list.filter((wt) => !arg || wt.agent.startsWith(arg.toLowerCase()));
+        if (!want.length) return add({ type: 'error', text: `No agent called ${arg} in the last run.` });
+        for (const wt of want) {
+          try {
+            add({ type: 'diff', agent: wt.agent, branch: wt.branch, base: wt.base, patch: diffWorktree(t.root, wt).patch });
+          } catch (e) {
+            add({ type: 'error', text: `Couldn’t diff ${wt.branch}: ${e.message}` });
+          }
+        }
+        return;
+      }
       case '/keep': {
         const t = lastTrees.current;
         if (!t) return info('Nothing to keep — /keep works after a parallel run in write mode.');
-        const choice = await pick('Keep whose changes?', [
-          ...t.list.map((wt) => ({ value: wt.agent, label: `${AGENTS[wt.agent].name}'s version`, description: `merge ${wt.branch} into your current branch` })),
-          { value: '__none', label: 'Neither', description: 'throw away both' },
-          { value: '__later', label: 'Decide later', description: 'leave the branches as they are' },
-        ]);
+        const stats = Object.fromEntries(t.list.map((wt) => {
+          try {
+            const s = diffWorktree(t.root, wt).stat.trim().split('\n').pop() || 'no changes';
+            return [wt.agent, s.trim()];
+          } catch {
+            return [wt.agent, ''];
+          }
+        }));
+        let choice;
+        for (;;) {
+          choice = await pick('Keep whose changes?', [
+            ...t.list.map((wt) => ({ value: wt.agent, label: `${AGENTS[wt.agent].name}'s version`, description: stats[wt.agent] })),
+            { value: '__diff', label: 'Show the diffs first', description: '' },
+            { value: '__none', label: 'Neither', description: 'throw away both' },
+            { value: '__later', label: 'Decide later', description: 'leave the branches as they are' },
+          ]);
+          if (choice !== '__diff') break;
+          await runCommand('/diff');
+        }
         if (!choice || choice === '__later') return;
         if (choice !== '__none') {
           try {
