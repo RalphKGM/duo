@@ -14,6 +14,7 @@ import {
 } from '../lib/config.js';
 import { runPrompt } from '../lib/engine.js';
 import { mergeWorktree, removeWorktrees } from '../lib/git.js';
+import { startApprovalServer, describeAction } from '../lib/approval.js';
 
 const MODES = {
   parallel: { label: 'Parallel', description: 'all agents answer the same prompt, then the answers are merged' },
@@ -291,6 +292,9 @@ export function App({ initialPrompt, initialCwd }) {
   const abortRef = useRef(null);
   const lastAnswer = useRef('');
   const lastTrees = useRef(null);
+  const approvalSrv = useRef(null);
+  const allowAll = useRef(new Set());
+  const approvalQueue = useRef(Promise.resolve());
 
   const add = useCallback((item) => setItems((xs) => [...xs, { id: uid(), ...item }]), []);
   const info = (text) => add({ type: 'info', text });
@@ -313,13 +317,14 @@ export function App({ initialPrompt, initialCwd }) {
     { isActive: busy && !dialog },
   );
 
-  const pick = (title, options, { hint, current } = {}) =>
+  const pick = (title, options, { hint, current, body } = {}) =>
     new Promise((resolve) => {
       const opts = options.map((o) => ({ ...o, current: current !== undefined && o.value === current }));
       setDialog({
         kind: 'select',
         title,
         hint,
+        body,
         options: opts,
         initial: Math.max(0, opts.findIndex((o) => o.current)),
         onSelect: (o) => (setDialog(null), resolve(o.value)),
@@ -330,6 +335,43 @@ export function App({ initialPrompt, initialCwd }) {
     new Promise((resolve) => {
       setDialog({ kind: 'text', title, hint, initial, onSubmit: (v) => (setDialog(null), resolve(v)), onCancel: () => (setDialog(null), resolve(null)) });
     });
+
+  const askApproval = async ({ agent, tool, input }) => {
+    const key = `${agent}:${tool}`;
+    if (allowAll.current.has(key)) return { allow: true };
+    if (!abortRef.current || abortRef.current.signal.aborted) return { allow: false, message: 'The run was cancelled.' };
+    const d = describeAction(tool, input);
+    const what = d.kind === 'command' ? 'commands' : d.kind === 'edit' ? 'file edits' : tool;
+    const v = await pick(`${AGENTS[agent]?.name || agent} wants to ${d.title}`, [
+      { value: 'yes', label: 'Yes', description: 'allow this once' },
+      { value: 'all', label: `Yes, and don't ask again`, description: `for ${AGENTS[agent]?.name || agent} ${what} this run` },
+      { value: 'no', label: 'No', description: 'deny it' },
+      { value: 'why', label: 'No, and say why…', description: 'tell the agent what to do instead' },
+    ], { body: d.detail });
+    if (v === 'yes') return { allow: true };
+    if (v === 'all') {
+      allowAll.current.add(key);
+      return { allow: true };
+    }
+    if (v === 'why') {
+      const msg = await ask('What should it do instead?');
+      return { allow: false, message: msg ? `The user denied this and said: ${msg}` : 'The user denied this action.' };
+    }
+    return { allow: false, message: 'The user denied this action.' };
+  };
+
+  useEffect(() => {
+    let srv;
+    startApprovalServer((req) => {
+      const p = approvalQueue.current.then(() => askApproval(req));
+      approvalQueue.current = p.catch(() => {});
+      return p;
+    }).then((s) => {
+      srv = s;
+      approvalSrv.current = s;
+    });
+    return () => srv?.close();
+  }, []);
 
   const agentOptions = () => Object.keys(AGENTS).map((a) => ({ value: a, label: AGENTS[a].name, description: a }));
   const modelOptions = (agent) => [...(agent === 'codex' ? codexModels() : CLAUDE_MODELS), { value: '__custom', label: 'Custom…', description: 'type any model id' }];
@@ -425,6 +467,7 @@ export function App({ initialPrompt, initialCwd }) {
         { value: 'access', label: 'Access', description: accessName(c) },
         { value: 'web', label: 'Web search', description: onOff(c.webSearch) },
         { value: 'isolation', label: 'Write isolation', description: c.isolation === 'worktree' ? 'separate git worktree per agent' : 'shared folder' },
+        { value: 'approvals', label: 'Write approvals', description: { commands: 'ask before Claude runs commands', everything: 'ask before every command and edit', never: 'never ask (Claude runs anything)' }[c.approvals] + ' · Codex stays sandboxed' },
         { value: 'approval', label: 'Plan approval', description: c.planApproval === 'ask' ? 'ask before running a plan' : 'run plans right away' },
         { value: 'maxTasks', label: 'Max tasks per plan', description: String(c.maxTasks) },
         { value: 'maxParallel', label: 'Tasks at once', description: String(c.maxParallel) },
@@ -476,6 +519,15 @@ export function App({ initialPrompt, initialCwd }) {
         case 'access': toggleWrite(); break;
         case 'web': setConfig((x) => ((x.webSearch = !x.webSearch), x)); break;
         case 'isolation': setConfig((x) => ((x.isolation = x.isolation === 'worktree' ? 'shared' : 'worktree'), x)); break;
+        case 'approvals': {
+          const v = await pick('When should Claude Code ask before acting in write mode?', [
+            { value: 'commands', label: 'Commands', description: 'edits are fine, ask before shell commands' },
+            { value: 'everything', label: 'Everything', description: 'ask before every command and every file edit' },
+            { value: 'never', label: 'Never', description: 'run anything without asking' },
+          ], { current: c.approvals, hint: 'Codex always runs in its own sandbox: it can only write inside the folder and has no network.' });
+          if (v) setConfig((x) => ((x.approvals = v), x));
+          break;
+        }
         case 'approval': setConfig((x) => ((x.planApproval = x.planApproval === 'ask' ? 'auto' : 'ask'), x)); break;
         case 'lean': setConfig((x) => ((x.lean = !x.lean), x)); break;
         case 'memory': setConfig((x) => ((x.rememberContext = !x.rememberContext), x)); break;
@@ -611,9 +663,10 @@ export function App({ initialPrompt, initialCwd }) {
     add({ type: 'user', text: prompt, route });
     const ac = new AbortController();
     abortRef.current = ac;
+    allowAll.current = new Set();
     setBusy(true);
     try {
-      const res = await runPrompt({ config: cfg.current, cwd: cwdRef.current, sessions: sessions.current, signal: ac.signal, ui }, prompt, route);
+      const res = await runPrompt({ config: cfg.current, cwd: cwdRef.current, sessions: sessions.current, signal: ac.signal, ui, approval: approvalSrv.current }, prompt, route);
       if (res.final) lastAnswer.current = res.final;
       if (res.trees) lastTrees.current = res.trees;
       if (!ac.signal.aborted) info(`Saved to ${tildify(res.runDir)}`);

@@ -87,7 +87,7 @@ export function useTick(ms = 120, active = true) {
 }
 export const frame = (t) => FRAMES[t % FRAMES.length];
 
-export function Select({ title, hint, options, initial = 0, onSelect, onCancel, width }) {
+export function Select({ title, hint, body, options, initial = 0, onSelect, onCancel, width }) {
   const [i, setI] = useState(Math.max(0, Math.min(initial, options.length - 1)));
   useInput((input, key) => {
     if (key.upArrow || input === 'k') setI((x) => (x - 1 + options.length) % options.length);
@@ -101,6 +101,7 @@ export function Select({ title, hint, options, initial = 0, onSelect, onCancel, 
     <${Box} flexDirection="column" borderStyle="round" borderColor=${T.accent} paddingX=${1} width=${width}>
       <${Text} bold color=${T.accent}>${title}</${Text}>
       ${hint ? html`<${Text} color=${T.dim}>${hint}</${Text}>` : null}
+      ${body ? html`<${Box} marginTop=${1} paddingX=${1} borderStyle="single" borderColor=${T.dim}><${Text}>${body}</${Text}></${Box}>` : null}
       <${Box} flexDirection="column" marginTop=${1}>
         ${options.map(
           (o, idx) => html`

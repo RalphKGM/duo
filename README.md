@@ -83,6 +83,20 @@ Follow-up prompts continue each agent's session, so "now compare it with X" work
 
 duo is read-only by default: agents can read files and search the web, nothing else. `/write` lets them edit files and run commands.
 
+Before Claude Code runs a shell command, duo asks you first:
+
+```text
+╭ Claude Code wants to run a command ─────────────────────╮
+│  $ curl -s https://example.com -o a.html                │
+│ ❯ 1. Yes                       allow this once          │
+│   2. Yes, and don't ask again  for commands this run    │
+│   3. No                        deny it                  │
+│   4. No, and say why…          tell it what to do       │
+╰─────────────────────────────────────────────────────────╯
+```
+
+Set it to ask for every edit too, or never, under `/settings` → Write approvals. Codex runs in its own sandbox in write mode: it can write only inside the folder and has no network.
+
 In parallel mode inside a git repo, each agent gets its own worktree and branch, so the two never edit the same checkout:
 
 ```text
@@ -127,6 +141,7 @@ Saved to `~/.duo/config.json`. `"default"` means whatever that CLI is already se
   "access": "research",        // or "write"
   "isolation": "worktree",     // or "shared"
   "planApproval": "ask",       // or "auto"
+  "approvals": "commands",     // or "everything", "never"
   "maxTasks": 6,
   "maxParallel": 4,
   "lean": true
